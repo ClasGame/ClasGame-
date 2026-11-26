@@ -618,46 +618,64 @@ body.dark .gdTrack{background:#333}
   confirmBox.addEventListener('click',function(e){if(e.target===confirmBox)cancelDelete()});
   confirmBox.querySelector('.gdConfirm').onclick=function(){if(!pendingDelete)return;removeComment(pendingDelete.game,pendingDelete.id);cancelDelete()};
   var $=function(s){return ov.querySelector(s)};
-  var mode='local',myId=ownerId,cache={},byUser={},myDoc=null,wchain=Promise.resolve();
+  // ============ ORTAK YORUMLAR (Firebase Realtime Database) ============
+  // Firebase veritabanı adresini tırnakların içine yaz. Örnek: 'https://proje-adi-default-rtdb.firebaseio.com'
+  var FIREBASE_URL='';
+  // =======================================================================
+  var DB=(FIREBASE_URL||'').replace(/\/+$/,''),mode='local',myId=ownerId,cache={},remote={},gone={},synced=false;
   var note=document.createElement('small');note.style.cssText='display:block;margin:6px 0;opacity:.7';
   $('.gdCom').insertBefore(note,$('.gdCommentStars'));
-  function setMode(m){mode=m;note.textContent=m==='local'?'Yorumlar şu an sadece bu cihazda saklanıyor (ortak yorumlar için Claude hesabınla giriş yapıp siteyi öyle aç).':m==='readonly'?'Herkesin yorumlarını görebilirsin; yorum yazmak için yazma yetkisi gerekiyor.':''}
+  function setMode(m){mode=m;note.textContent=m==='local'?'Yorumlar şu an sadece bu cihazda saklanıyor.':''}
   function loadLocal(){try{return JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){return{}}}
   function saveLocal(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
   function load(){return mode==='local'?loadLocal():cache}
   function refresh(){badges();if(cur&&ov.classList.contains('open')){render();renderRate()}}
   function rebuild(){
     var out=Object.create(null);
-    Object.keys(byUser).forEach(function(uid){(byUser[uid]||[]).forEach(function(c){
-      if(!c||typeof c.g!=='string'||typeof c.t!=='string')return;
+    Object.keys(remote).forEach(function(k){
+      var c=remote[k];if(!c||typeof c.g!=='string'||typeof c.t!=='string')return;
       var s=Math.round(Number(c.stars));if(!(s>=1&&s<=5))s=0;
-      (out[c.g]=out[c.g]||[]).push({n:String(c.n||'Misafir').slice(0,40),t:c.t.slice(0,300),d:Number(c.d)||0,stars:s,id:String(c.id||''),owner:uid});
-    })});
+      (out[c.g]=out[c.g]||[]).push({n:String(c.n||'Misafir').slice(0,40),t:c.t.slice(0,300),d:Number(c.d)||0,stars:s,id:k,owner:c.o});
+    });
     Object.keys(out).forEach(function(g){out[g].sort(function(a,b){return a.d-b.d})});
     cache=out;
   }
-  function mutateMine(fn,done){
-    var prev=byUser[myId]||[],next=fn(prev.slice());
-    if(JSON.stringify(next).length>240000){alert('Yorum limitine ulaştın. Eski yorumlarından bazılarını silmelisin.');return false}
-    byUser[myId]=next;rebuild();refresh();
-    wchain=wchain.then(function(){return myDoc.set({items:next})}).then(function(){if(done)done()}).catch(function(){byUser[myId]=prev;rebuild();refresh();alert('Yorum kaydedilemedi. Yazma yetkin olmayabilir ya da bağlantı koptu.')});
-    return true;
+  function post(item){
+    return fetch(DB+'/comments.json',{method:'POST',body:JSON.stringify(item)}).then(function(r){if(!r.ok)throw new Error('post');return r.json()});
+  }
+  function pull(){
+    return fetch(DB+'/comments.json').then(function(r){if(!r.ok)throw new Error('get');return r.json()}).then(function(d){
+      var m={};d=d||{};
+      Object.keys(d).forEach(function(k){if(!gone[k])m[k]=d[k]});
+      Object.keys(remote).forEach(function(k){if(k.indexOf('tmp')===0)m[k]=remote[k]});
+      remote=m;rebuild();
+      if(!synced){synced=true;setMode('remote');migrate()}
+      refresh();
+    });
   }
   function addComment(game,c){
     if(mode==='local'){var all=loadLocal();(all[game]=all[game]||[]).push(c);saveLocal(all);refresh();return true}
-    if(mode!=='db'){alert('Yorum yazmak için yazma yetkisine sahip olman gerekiyor.');return false}
-    return mutateMine(function(a){a.push({g:game,n:c.n,t:c.t,d:c.d,stars:c.stars,id:c.id});return a});
+    var item={g:game,n:c.n,t:c.t,d:c.d,stars:c.stars,o:ownerId},tmp='tmp'+c.id;
+    remote[tmp]=item;rebuild();refresh();
+    post(item).then(function(j){delete remote[tmp];remote[j.name]=item;rebuild();refresh()}).catch(function(){delete remote[tmp];rebuild();refresh();alert('Yorum gönderilemedi. İnternet bağlantını kontrol edip tekrar dene.')});
+    return true;
   }
   function removeComment(game,id){
     if(mode==='local'){var all=loadLocal();all[game]=(all[game]||[]).filter(function(c){return !(c.id===id&&c.owner===ownerId)});saveLocal(all);refresh();return}
-    if(mode==='db')mutateMine(function(a){return a.filter(function(c){return !(c.id===id&&c.g===game)})});
+    var it=remote[id];if(!it||it.o!==ownerId)return;
+    delete remote[id];gone[id]=1;rebuild();refresh();
+    fetch(DB+'/comments/'+encodeURIComponent(id)+'.json',{method:'DELETE'}).then(function(r){if(!r.ok)throw new Error('del')}).catch(function(){delete gone[id];remote[id]=it;rebuild();refresh();alert('Yorum silinemedi. Tekrar dene.')});
   }
   function migrate(){
-    var all=loadLocal(),add=[],have={};
-    (byUser[myId]||[]).forEach(function(c){have[c.id]=1});
-    Object.keys(all).forEach(function(g){(all[g]||[]).forEach(function(c){if(c&&c.owner===ownerId&&c.id&&c.t&&!have[c.id])add.push({g:g,n:c.n,t:c.t,d:c.d,stars:c.stars,id:c.id})})});
-    if(!add.length)return;
-    mutateMine(function(a){return a.concat(add)},function(){var l=loadLocal();Object.keys(l).forEach(function(g){l[g]=(l[g]||[]).filter(function(c){return !(c&&c.owner===ownerId)})});saveLocal(l)});
+    var all=loadLocal();
+    Object.keys(all).forEach(function(g){(all[g]||[]).forEach(function(c){
+      if(!c||c.owner!==ownerId||!c.id||typeof c.t!=='string'||!c.t)return;
+      var s=Math.round(Number(c.stars));if(!(s>=1&&s<=5))return;
+      post({g:g,n:String(c.n||'Misafir').slice(0,40),t:c.t.slice(0,300),d:Number(c.d)||Date.now(),stars:s,o:ownerId}).then(function(j){
+        var l=loadLocal();l[g]=(l[g]||[]).filter(function(x){return x.id!==c.id});saveLocal(l);
+        remote[j.name]={g:g,n:c.n,t:c.t,d:c.d,stars:s,o:ownerId};rebuild();refresh();
+      }).catch(function(){});
+    })});
   }
   function render(){
     var list=$('.gdList'),arr=(load()[cur.name]||[]).slice().reverse();
@@ -723,23 +741,9 @@ body.dark .gdTrack{background:#333}
   $('.gdForm button').onclick=send;
   $('.gdForm input').addEventListener('keydown',function(e){if(e.key==='Enter')send()});
   setMode('local');
-  if(window.claude&&typeof claude.use==='function'){
-    Promise.all([claude.use('db'),claude.use('user')]).then(function(r){
-      var db=r[0],user=r[1];if(!db)return;
-      return Promise.resolve(user&&user.id()).then(function(id){
-        return Promise.resolve(user&&user.can('data.write')).then(function(w){
-          var first=true;
-          if(id)myDoc=db.doc('comments/'+id);
-          db.collection('comments').onSnapshot(function(snap){
-            var m={};snap.docs.forEach(function(d){var x=d.data()||{};m[d.id]=Array.isArray(x.items)?x.items:[]});
-            byUser=m;
-            if(first){first=false;if(id)myId=id;setMode(id&&w!==false?'db':'readonly');rebuild();if(mode==='db')migrate()}
-            else rebuild();
-            refresh();
-          },function(){});
-        });
-      });
-    }).catch(function(){});
+  if(DB){
+    pull().catch(function(){});
+    setInterval(function(){if(!document.hidden)pull().catch(function(){})},15000);
   }
   badges();setTimeout(badges,600);
 })();
